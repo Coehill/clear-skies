@@ -11,6 +11,7 @@ use super::{parsers, LocalDateTime};
 pub struct Builder<Tz: TimeZone> {
     forecasts: Vec<Day>,
     local_time: DateTime<Tz>,
+    local_date: Option<NaiveDate>,
 }
 
 impl<Tz: TimeZone> Builder<Tz> {
@@ -18,11 +19,17 @@ impl<Tz: TimeZone> Builder<Tz> {
         Self {
             forecasts: Vec::with_capacity(14),
             local_time: feed_updated.with_timezone(local_tz),
+            local_date: None,
         }
     }
 
     pub fn add(&mut self, entry: &Entry) -> Result<()> {
         let (forecast, period) = Forecast::from_entry(entry)?;
+        let local_date = *self.local_date.get_or_insert_with(|| {
+            self.local_time
+                .with_timezone(forecast.issued_at.ts.offset())
+                .date_naive()
+        });
 
         if period.is_night {
             match self.forecasts.last_mut() {
@@ -37,28 +44,28 @@ impl<Tz: TimeZone> Builder<Tz> {
                 // Feed was retrieved during the day, so only the night forecast is available
                 None => {
                     self.forecasts.push(Day {
-                        date: self.local_time.date_naive(),
+                        date: local_date,
                         forecast: DailyForecast::Night(forecast),
                     });
 
-                    self.local_time = self.local_time.clone() + Days::new(1);
+                    self.local_date = Some(local_date + Days::new(1));
                 }
             }
         } else {
-            if period.weekday != self.local_time.weekday() {
+            if period.weekday != local_date.weekday() {
                 return Err(eyre!(
                     "expected {} for entry: {:?}",
-                    self.local_time.weekday(),
+                    local_date.weekday(),
                     &entry.title
                 ));
             }
 
             self.forecasts.push(Day {
-                date: self.local_time.date_naive(),
+                date: local_date,
                 forecast: DailyForecast::Abridged(forecast),
             });
 
-            self.local_time = self.local_time.clone() + Days::new(1);
+            self.local_date = Some(local_date + Days::new(1));
         }
 
         Ok(())

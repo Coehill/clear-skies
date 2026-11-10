@@ -119,3 +119,70 @@ impl CanadaTz {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_alberta_and_yukon_reports_across_local_midnight() {
+        for (city, zone, offset_hours) in [("Airdrie", "ABT", 6), ("Whitehorse", "YT", 7)] {
+            for (updated, time, weekday, day) in [
+                (
+                    format!("2026-11-11T{:02}:30:00Z", offset_hours - 1),
+                    "11:30 PM",
+                    "Tuesday",
+                    10,
+                ),
+                (
+                    format!("2026-11-11T{offset_hours:02}:30:00Z"),
+                    "12:30 AM",
+                    "Wednesday",
+                    11,
+                ),
+            ] {
+                let xml = format!(
+                    r#"<feed xmlns="http://www.w3.org/2005/Atom">
+                        <title>{city} - Weather - Environment Canada</title>
+                        <updated>{updated}</updated>
+                        <link rel="related" href="https://weather.gc.ca/" type="text/html"/>
+                        <entry>
+                            <id>conditions</id><title>Current Conditions</title>
+                            <summary type="html">&lt;b&gt;Observed at:&lt;/b&gt; {city} Airport {time} {zone} {weekday} {day} November 2026&lt;br/&gt;</summary>
+                            <link href="https://weather.gc.ca/" type="text/html"/>
+                            <category term="Current Conditions"/><updated>{updated}</updated>
+                        </entry>
+                        <entry>
+                            <id>forecast</id><title>{weekday}: Sunny. High 14.</title>
+                            <summary type="html">Sunny. Forecast issued {time} {zone} {weekday} {day} November 2026</summary>
+                            <link href="https://weather.gc.ca/" type="text/html"/>
+                            <category term="Weather Forecasts"/><updated>{updated}</updated>
+                        </entry>
+                        </feed>"#
+                );
+                let feed = WeatherFeed::from_xml_str(&xml).unwrap();
+                let report = WeatherReport::from_weather_feed(feed, CanadaTz::Mountain).unwrap();
+                let conditions = report.current_conditions.unwrap();
+                assert_eq!(
+                    conditions
+                        .observed_at
+                        .datetime
+                        .ts
+                        .offset()
+                        .local_minus_utc(),
+                    -offset_hours * 3600
+                );
+                assert_eq!(report.weather_forecasts.len(), 1);
+                assert_eq!(
+                    report.weather_forecasts[0].date.to_string(),
+                    format!("2026-11-{day}")
+                );
+                let forecast = report.weather_forecasts[0].forecast.forecasts()[0];
+                assert_eq!(
+                    forecast.issued_at.ts.offset().local_minus_utc(),
+                    -offset_hours * 3600
+                );
+            }
+        }
+    }
+}

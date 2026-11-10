@@ -1,4 +1,4 @@
-use chrono::{Month, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Weekday};
+use chrono::{FixedOffset, Month, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Weekday};
 
 use nom::{
     branch::alt,
@@ -48,18 +48,30 @@ fn month(input: &str) -> IResult<&str, Month> {
     ))(input)
 }
 
-fn abbreviated_timezone(input: &str) -> IResult<&str, CanadaTz> {
-    terminated(
-        alt((
-            map(char('A'), |_| CanadaTz::Atlantic),
-            map(char('C'), |_| CanadaTz::Central),
-            map(char('E'), |_| CanadaTz::Eastern),
-            map(char('M'), |_| CanadaTz::Mountain),
-            map(char('N'), |_| CanadaTz::Newfoundland),
-            map(char('P'), |_| CanadaTz::Pacific),
-        )),
-        pair(alt((char('D'), char('S'))), char('T')),
-    )(input)
+fn abbreviated_timezone(input: &str) -> IResult<&str, (CanadaTz, Option<FixedOffset>)> {
+    // ECCC's timezone mapping: https://weather.gc.ca/en/location/index.html
+    alt((
+        map(tag("ABT"), |_| {
+            (CanadaTz::Mountain, FixedOffset::west_opt(6 * 3600))
+        }),
+        map(tag("YT"), |_| {
+            (CanadaTz::Mountain, FixedOffset::west_opt(7 * 3600))
+        }),
+        map(
+            terminated(
+                alt((
+                    map(char('A'), |_| CanadaTz::Atlantic),
+                    map(char('C'), |_| CanadaTz::Central),
+                    map(char('E'), |_| CanadaTz::Eastern),
+                    map(char('M'), |_| CanadaTz::Mountain),
+                    map(char('N'), |_| CanadaTz::Newfoundland),
+                    map(char('P'), |_| CanadaTz::Pacific),
+                )),
+                pair(alt((char('D'), char('S'))), char('T')),
+            ),
+            |tz| (tz, None),
+        ),
+    ))(input)
 }
 
 enum PeriodOfDay {
@@ -107,15 +119,42 @@ pub fn local_datetime(input: &str) -> IResult<&str, LocalDateTime> {
             preceded(char(' '), weekday),
             preceded(char(' '), date),
         )),
-        |(time, tz, _weekday, date)| {
+        |(time, (tz, offset), _weekday, date)| {
             let local = NaiveDateTime::new(date, time);
-            tz.chrono()
-                .from_local_datetime(&local)
-                .single()
-                .map(|dt| LocalDateTime {
-                    ts: dt.fixed_offset(),
-                    tz,
-                })
+            let ts = match offset {
+                Some(offset) => offset.from_local_datetime(&local).single(),
+                None => tz
+                    .chrono()
+                    .from_local_datetime(&local)
+                    .single()
+                    .map(|dt| dt.fixed_offset()),
+            };
+            ts.map(|ts| LocalDateTime { ts, tz })
         },
     )(input)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Timelike;
+
+    #[test]
+    fn parses_eccc_alberta_and_yukon_offsets_in_winter_and_summer() {
+        for (zone, seconds_west) in [("ABT", 6 * 3600), ("YT", 7 * 3600)] {
+            for date in ["Tuesday 10 November 2026", "Friday 10 July 2026"] {
+                let input = format!("5:00 PM {zone} {date}");
+                let (remaining, datetime) = local_datetime(&input).unwrap();
+                assert_eq!(remaining, "");
+                assert_eq!(datetime.ts.offset().local_minus_utc(), -seconds_west);
+                assert_eq!(datetime.ts.hour(), 17);
+                assert_eq!(datetime.tz, CanadaTz::Mountain);
+            }
+        }
+    }
+
+    #[test]
+    fn rejects_unknown_timezone_abbreviations() {
+        assert!(local_datetime("5:00 PM XYZ Tuesday 10 November 2026").is_err());
+    }
 }
