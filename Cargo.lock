@@ -3410,11 +3410,13 @@ dependencies = [
  "clap",
  "color-eyre",
  "deunicode",
+ "fs4",
  "indoc",
  "reqwest",
  "scraper",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "weather-lib",
 ]

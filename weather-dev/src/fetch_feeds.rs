@@ -100,12 +100,13 @@ fn feed_url(base_url: &Url, latitude: &str, longitude: &str) -> Result<Url> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fs4::FileExt;
+    use std::fs::{File, OpenOptions};
     use std::io::{BufRead, BufReader, Write};
     use std::net::TcpListener;
-    use std::path::PathBuf;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::thread;
     use std::time::{Duration, Instant};
+    use tempfile::TempDir;
 
     const LOCATION_LINK: &str =
         r#"<a href="/en/location/index.html?coords=45.529,-73.562">Montreal</a>"#;
@@ -116,25 +117,187 @@ mod tests {
               type="application/atom+xml"/>
     </feed>"#;
 
-    struct CacheDir(PathBuf);
+    struct CacheDir {
+        directory: Option<TempDir>,
+        lease: Option<File>,
+    }
+
+    fn registry_lock(root: &Path) -> File {
+        let lock = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(root.join("registry.lock"))
+            .expect("open test cache registry lock");
+        lock.lock_exclusive().expect("lock test cache registry");
+        lock
+    }
 
     impl CacheDir {
         fn new() -> Self {
-            static NEXT_ID: AtomicUsize = AtomicUsize::new(0);
-            let path = std::env::temp_dir().join(format!(
-                "clear-skies-feeds-{}-{}",
-                std::process::id(),
-                NEXT_ID.fetch_add(1, Ordering::Relaxed)
-            ));
-            std::fs::create_dir(&path).unwrap();
-            Self(path)
+            Self::new_in(&std::env::temp_dir().join("clear-skies-feed-cache-tests"))
+        }
+
+        fn new_in(root: &Path) -> Self {
+            std::fs::create_dir_all(root).expect("create test cache root");
+            assert!(
+                std::fs::symlink_metadata(root).unwrap().is_dir(),
+                "test cache root must be a directory, not a symlink"
+            );
+            let _registry = registry_lock(root);
+
+            for entry in std::fs::read_dir(root).unwrap() {
+                let entry = entry.unwrap();
+                if !entry.file_name().to_string_lossy().starts_with("cache-")
+                    || !entry.file_type().unwrap().is_dir()
+                {
+                    continue;
+                }
+                let path = entry.path();
+                let lease = match OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(path.join("lease"))
+                {
+                    Ok(lease) => Some(lease),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                    Err(error) => panic!("open test cache lease: {error}"),
+                };
+                if let Some(lease) = &lease {
+                    match lease.try_lock_exclusive() {
+                        Ok(()) => {}
+                        Err(error) if error.kind() == fs4::lock_contended_error().kind() => {
+                            continue
+                        }
+                        Err(error) => panic!("lock test cache lease: {error}"),
+                    }
+                }
+                // The registry lock prevents creation racing with orphan cleanup.
+                drop(lease);
+                std::fs::remove_dir_all(path).expect("remove abandoned test cache");
+            }
+
+            let directory = tempfile::Builder::new()
+                .prefix("cache-")
+                .tempdir_in(root)
+                .unwrap();
+            let lease = OpenOptions::new()
+                .create_new(true)
+                .read(true)
+                .write(true)
+                .open(directory.path().join("lease"))
+                .unwrap();
+            lease.lock_exclusive().unwrap();
+            std::fs::create_dir(directory.path().join("feeds")).unwrap();
+            Self {
+                directory: Some(directory),
+                lease: Some(lease),
+            }
+        }
+
+        fn path(&self) -> std::path::PathBuf {
+            self.directory.as_ref().unwrap().path().join("feeds")
         }
     }
 
     impl Drop for CacheDir {
         fn drop(&mut self) {
-            std::fs::remove_dir_all(&self.0).expect("remove test cache directory");
+            if let Some(directory) = self.directory.take() {
+                let _registry = registry_lock(directory.path().parent().unwrap());
+                drop(self.lease.take());
+                directory.close().expect("remove test cache directory");
+            }
         }
+    }
+
+    #[test]
+    fn removes_test_cache_on_drop() {
+        let root = tempfile::tempdir().unwrap();
+        let cache = CacheDir::new_in(root.path());
+        let path = cache.directory.as_ref().unwrap().path().to_owned();
+        std::fs::write(cache.path().join("feed.xml"), FEED).unwrap();
+        drop(cache);
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn cleanup_preserves_active_caches_and_unrelated_entries() {
+        let root = tempfile::tempdir().unwrap();
+        let active = CacheDir::new_in(root.path());
+        let feed = active.path().join("feed.xml");
+        std::fs::write(&feed, FEED).unwrap();
+        let unrelated = root.path().join("other-tests");
+        std::fs::create_dir(&unrelated).unwrap();
+        let incomplete = root.path().join("cache-incomplete");
+        std::fs::create_dir(&incomplete).unwrap();
+
+        let next = CacheDir::new_in(root.path());
+        assert_eq!(std::fs::read_to_string(feed).unwrap(), FEED);
+        assert_ne!(active.path(), next.path());
+        assert!(unrelated.is_dir());
+        assert!(!incomplete.exists());
+    }
+
+    #[test]
+    fn reclaims_test_cache_after_forced_process_termination() {
+        const CHILD_ROOT: &str = "CLEAR_SKIES_TEST_CACHE_CHILD_ROOT";
+        if let Some(root) = std::env::var_os(CHILD_ROOT) {
+            let root = std::path::PathBuf::from(root);
+            let cache = CacheDir::new_in(&root.join("caches"));
+            std::fs::write(
+                root.join("ready.tmp"),
+                cache.directory.as_ref().unwrap().path().to_str().unwrap(),
+            )
+            .unwrap();
+            std::fs::rename(root.join("ready.tmp"), root.join("ready")).unwrap();
+            loop {
+                thread::sleep(Duration::from_secs(60));
+            }
+        }
+
+        let root = tempfile::tempdir().unwrap();
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "fetch_feeds::tests::reclaims_test_cache_after_forced_process_termination",
+            ])
+            .env(CHILD_ROOT, root.path())
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let ready = root.path().join("ready");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !ready.exists() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        child
+            .kill()
+            .expect("terminate test child without running destructors");
+        child.wait().expect("reap test child");
+        let abandoned = std::path::PathBuf::from(
+            std::fs::read_to_string(ready).expect("child created its cache before termination"),
+        );
+        assert!(abandoned.is_dir());
+
+        let next = CacheDir::new_in(&root.path().join("caches"));
+        assert!(!abandoned.exists());
+        assert!(next.path().is_dir());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cleanup_does_not_follow_directory_symlinks() {
+        let root = tempfile::tempdir().unwrap();
+        let unrelated = tempfile::tempdir().unwrap();
+        let file = unrelated.path().join("keep.xml");
+        std::fs::write(&file, FEED).unwrap();
+        let link = root.path().join("cache-symlink");
+        std::os::unix::fs::symlink(unrelated.path(), &link).unwrap();
+
+        let _cache = CacheDir::new_in(root.path());
+        assert!(link.is_symlink());
+        assert_eq!(std::fs::read_to_string(file).unwrap(), FEED);
     }
 
     fn mock_server(responses: Vec<(u16, String)>) -> (Url, thread::JoinHandle<Vec<String>>) {
@@ -196,7 +359,7 @@ mod tests {
             .unwrap();
         let result = cache_province(
             &client,
-            &cache.0,
+            &cache.path(),
             &base_url.join("listing").unwrap(),
             &base_url.join("rss/weather/").unwrap(),
             "QC",
@@ -222,9 +385,9 @@ mod tests {
                 "GET /rss/weather/45.529_-73.562_e.xml HTTP/1.1",
             ]
         );
-        assert_eq!(std::fs::read_dir(&cache.0).unwrap().count(), 1);
+        assert_eq!(std::fs::read_dir(cache.path()).unwrap().count(), 1);
         assert_eq!(
-            std::fs::read_to_string(cache.0.join("QC-45.529_-73.562.xml")).unwrap(),
+            std::fs::read_to_string(cache.path().join("QC-45.529_-73.562.xml")).unwrap(),
             FEED
         );
     }
@@ -240,13 +403,13 @@ mod tests {
             Some(reqwest::StatusCode::INTERNAL_SERVER_ERROR)
         );
         assert_eq!(requests.len(), 1);
-        assert_eq!(std::fs::read_dir(&cache.0).unwrap().count(), 0);
+        assert_eq!(std::fs::read_dir(cache.path()).unwrap().count(), 0);
     }
 
     #[tokio::test]
     async fn returns_feed_http_errors_without_overwriting_cached_files() {
         let cache = CacheDir::new();
-        let path = cache.0.join("QC-45.529_-73.562.xml");
+        let path = cache.path().join("QC-45.529_-73.562.xml");
         std::fs::write(&path, FEED).unwrap();
         let (result, requests) = download(
             &cache,
@@ -275,7 +438,7 @@ mod tests {
 
         result.unwrap();
         assert_eq!(
-            std::fs::read_to_string(cache.0.join("QC-45.529_-73.562.xml")).unwrap(),
+            std::fs::read_to_string(cache.path().join("QC-45.529_-73.562.xml")).unwrap(),
             invalid_feed
         );
         assert!(
