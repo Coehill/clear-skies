@@ -1,3 +1,6 @@
+> [!WARNING]
+> Environment Canada now provides its own [forecast API](https://api.weather.gc.ca/collections/citypageweather-realtime?lang=en). It's still experimental, but worth considering before using Clear Skies for a new project.
+
 # Clear Skies 🌤️
 
 A simple weather API backed by Environment Canada's [Current Condition & Forecast Atom feeds](https://www.canada.ca/en/environment-climate-change/services/weather-general-tools-resources/weatheroffice-online-services/data-services.html#toc1).
