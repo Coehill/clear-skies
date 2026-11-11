@@ -51,6 +51,9 @@ fn month(input: &str) -> IResult<&str, Month> {
 fn abbreviated_timezone(input: &str) -> IResult<&str, (CanadaTz, Option<FixedOffset>)> {
     // ECCC's timezone mapping: https://weather.gc.ca/en/location/index.html
     alt((
+        map(tag("PCT"), |_| {
+            (CanadaTz::Pacific, FixedOffset::west_opt(7 * 3600))
+        }),
         map(tag("ABT"), |_| {
             (CanadaTz::Mountain, FixedOffset::west_opt(6 * 3600))
         }),
@@ -140,15 +143,19 @@ mod tests {
     use chrono::Timelike;
 
     #[test]
-    fn parses_eccc_alberta_and_yukon_offsets_in_winter_and_summer() {
-        for (zone, seconds_west) in [("ABT", 6 * 3600), ("YT", 7 * 3600)] {
+    fn parses_eccc_fixed_offsets_in_winter_and_summer() {
+        for (zone, seconds_west, expected_tz) in [
+            ("ABT", 6 * 3600, CanadaTz::Mountain),
+            ("YT", 7 * 3600, CanadaTz::Mountain),
+            ("PCT", 7 * 3600, CanadaTz::Pacific),
+        ] {
             for date in ["Tuesday 10 November 2026", "Friday 10 July 2026"] {
                 let input = format!("5:00 PM {zone} {date}");
                 let (remaining, datetime) = local_datetime(&input).unwrap();
                 assert_eq!(remaining, "");
                 assert_eq!(datetime.ts.offset().local_minus_utc(), -seconds_west);
                 assert_eq!(datetime.ts.hour(), 17);
-                assert_eq!(datetime.tz, CanadaTz::Mountain);
+                assert_eq!(datetime.tz, expected_tz);
             }
         }
     }

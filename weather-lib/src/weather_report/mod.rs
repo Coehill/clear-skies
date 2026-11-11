@@ -125,8 +125,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_alberta_and_yukon_reports_across_local_midnight() {
-        for (city, zone, offset_hours) in [("Airdrie", "ABT", 6), ("Whitehorse", "YT", 7)] {
+    fn parses_fixed_offset_reports_across_local_midnight() {
+        for (city, zone, offset_hours, tz) in [
+            ("Airdrie", "ABT", 6, CanadaTz::Mountain),
+            ("Whitehorse", "YT", 7, CanadaTz::Mountain),
+            ("Vancouver", "PCT", 7, CanadaTz::Pacific),
+        ] {
             for (updated, time, weekday, day) in [
                 (
                     format!("2026-11-11T{:02}:30:00Z", offset_hours - 1),
@@ -147,6 +151,12 @@ mod tests {
                         <updated>{updated}</updated>
                         <link rel="related" href="https://weather.gc.ca/" type="text/html"/>
                         <entry>
+                            <id>warning</id><title>Rainfall warning</title>
+                            <summary type="html">Heavy rain expected. Issued: {time} {zone} {weekday} {day} November 2026</summary>
+                            <link href="https://weather.gc.ca/" type="text/html"/>
+                            <category term="Warnings and Watches"/><updated>{updated}</updated>
+                        </entry>
+                        <entry>
                             <id>conditions</id><title>Current Conditions</title>
                             <summary type="html">&lt;b&gt;Observed at:&lt;/b&gt; {city} Airport {time} {zone} {weekday} {day} November 2026&lt;br/&gt;</summary>
                             <link href="https://weather.gc.ca/" type="text/html"/>
@@ -161,7 +171,17 @@ mod tests {
                         </feed>"#
                 );
                 let feed = WeatherFeed::from_xml_str(&xml).unwrap();
-                let report = WeatherReport::from_weather_feed(feed, CanadaTz::Mountain).unwrap();
+                let report = WeatherReport::from_weather_feed(feed, tz).unwrap();
+                assert_eq!(report.special_weather_statements.len(), 1);
+                assert_eq!(
+                    report.special_weather_statements[0]
+                        .issued_at
+                        .ts
+                        .offset()
+                        .local_minus_utc(),
+                    -offset_hours * 3600
+                );
+                assert_eq!(report.special_weather_statements[0].issued_at.tz, tz);
                 let conditions = report.current_conditions.unwrap();
                 assert_eq!(
                     conditions
