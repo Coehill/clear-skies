@@ -72,7 +72,10 @@ fn province_listing_url(base_url: &Url, province_code: &str) -> Url {
     listing_url
 }
 
-fn coordinates_from_location_href(base_url: &Url, href: &str) -> Result<(String, String)> {
+pub(crate) fn coordinates_from_location_href(
+    base_url: &Url,
+    href: &str,
+) -> Result<(String, String)> {
     let location_url = base_url.join(href)?;
     let coordinates = location_url
         .query_pairs()

@@ -238,8 +238,10 @@ impl MappingBuilder {
             province_or_territory.to_abbr().to_ascii_uppercase()
         );
 
-        let LonLat(lon, lat) = match geocode::cache().get(search_string.as_str()) {
-            Some(entry) => *entry,
+        let LonLat(lon, lat) = match coordinates_from_page(&html_url)?
+            .or_else(|| geocode::cache().get(search_string.as_str()).copied())
+        {
+            Some(entry) => entry,
             None => {
                 if let Some(geocoder) = self.geocoder.as_ref() {
                     let response = self.tokio_rt.block_on(geocoder.lookup(&search_string))?;
@@ -267,6 +269,45 @@ impl MappingBuilder {
             html_url,
             coordinates: Coordinates { lat, lon },
         })
+    }
+}
+
+fn coordinates_from_page(html_url: &str) -> Result<Option<LonLat>> {
+    let url = reqwest::Url::parse(html_url)?;
+    if !url.query_pairs().any(|(key, _)| key == "coords") {
+        return Ok(None);
+    }
+    let (lat, lon) = crate::fetch_feeds::coordinates_from_location_href(&url, html_url)?;
+    Ok(Some(LonLat(lon.parse()?, lat.parse()?)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn uses_authoritative_page_coordinates() {
+        let LonLat(lon, lat) = coordinates_from_page(
+            "https://weather.gc.ca/en/location/index.html?coords=76.417,-82.894",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!((lat, lon), (76.417, -82.894));
+    }
+
+    #[test]
+    fn only_legacy_pages_need_geocoding() {
+        assert!(
+            coordinates_from_page("https://weather.gc.ca/city/pages/nu-12_metric_e.html")
+                .unwrap()
+                .is_none()
+        );
+        for coords in ["", "NaN,0", "91,0", "0,181", "0", "0,infinity"] {
+            assert!(coordinates_from_page(&format!(
+                "https://weather.gc.ca/en/location/index.html?coords={coords}"
+            ))
+            .is_err());
+        }
     }
 }
 
