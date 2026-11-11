@@ -30,6 +30,11 @@ Once you have Nix installed, you can run:
 in each province and territory listing. Use a fresh cache directory before
 running `build-mapping` to avoid mixing old and new feed files.
 
+When correcting a catalogue entry, verify its coordinates against ECCC's
+province listing and update both `weather-dev/data/coordinates.json` and the
+entry in `weather-lib/src/locations/data.rs`. Check the returned location name,
+not just the HTTP status.
+
 ### Static Assets
 
 The HTML, JS, and CSS files in the `weather-server/src/static` directory are bundled into the `weather-server` binary using [`rust-embed`](https://lib.rs/crates/rust-embed). In debug builds these are served from the filesystem so you don't need to rebuild the binary every time you change them.
