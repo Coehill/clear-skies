@@ -130,6 +130,9 @@ mod tests {
             ("Airdrie", "ABT", 6, CanadaTz::Mountain),
             ("Whitehorse", "YT", 7, CanadaTz::Mountain),
             ("Vancouver", "PCT", 7, CanadaTz::Pacific),
+            ("Winnipeg", "MBT", 5, CanadaTz::Central),
+            ("Yellowknife", "MDT", 6, CanadaTz::Mountain),
+            ("Kenora", "CDT", 5, CanadaTz::Central),
         ] {
             for (updated, time, weekday, day) in [
                 (
